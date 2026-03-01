@@ -1,0 +1,59 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# =========================
+# Virtual Environment
+# =========================
+env/
+venv/
+ENV/
+.venv/
+
+# =========================
+# Environment Variables
+# =========================
+.env
+
+# =========================
+# Django
+# =========================
+*.log
+db.sqlite3
+media/
+staticfiles/
+
+# =========================
+# PostgreSQL
+# =========================
+*.sql
+
+# =========================
+# Migrations (Optional)
+# =========================
+# Uncomment ONLY if you don’t want migrations tracked
+# */migrations/
+# !*/migrations/__init__.py
+
+# =========================
+# VS Code
+# =========================
+.vscode/
+
+# =========================
+# PyCharm
+# =========================
+.idea/
+
+# =========================
+# macOS
+# =========================
+.DS_Store
+
+# =========================
+# Node (if backend + frontend together)
+# =========================
+node_modules/
