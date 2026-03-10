@@ -105,6 +105,11 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
+RAZORPAY_KEY_ID     = "rzp_test_SPVg80Q81FoLcf"   # from Razorpay dashboard
+RAZORPAY_KEY_SECRET = "xuSRiex6UstbT0Ji83Qkl15q"
+
+
+
 ROOT_URLCONF = 'Backend.urls'
 
 TEMPLATES = [

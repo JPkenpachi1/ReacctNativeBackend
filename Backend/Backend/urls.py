@@ -67,10 +67,18 @@ urlpatterns = [
         get_vendor_store_orders,
         name="get_vendor_store_orders",
     ),
-    path('product-orders/<int:order_id>/cancel/', user_cancel_order, name='user-cancel-order'),
-path('vendor/product-orders/<int:order_id>/cancel/', vendor_cancel_order, name='vendor-cancel-order'),
+    path('api/product-orders/<int:order_id>/cancel/', user_cancel_order, name='user-cancel-order'),
+path('api/vendor/product-orders/<int:order_id>/cancel/', vendor_cancel_order, name='vendor-cancel-order'),
 
 path('push-token/', register_push_token, name='register-push-token'),
+path(
+    'api/vendor/product-orders/<int:order_id>/update-status/',
+    vendor_update_order_status,
+    name='vendor-update-order-status'
+),
+path('api/orders/<int:order_id>/create-payment/',  create_product_payment,   name='create-product-payment'),
+path('api/orders/<int:order_id>/verify-payment/',  verify_product_payment,    name='verify-product-payment'),
+path('api/orders/<int:order_id>/payment-status/',  product_payment_status,    name='product-payment-status'),
 
     
 ]+ (static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT) if settings.DEBUG else [])

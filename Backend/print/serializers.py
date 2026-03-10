@@ -519,3 +519,23 @@ class PrdouctStoreVise(serializers.ModelSerializer):
             "is_open",
             "products",
         ]
+
+
+
+
+
+# Add to your existing serializers.py
+
+class ProductPaymentSerializer(serializers.ModelSerializer):
+    order_number = serializers.CharField(source='order.order_number', read_only=True)
+    store_name   = serializers.CharField(source='order.store.name', read_only=True)
+
+    class Meta:
+        model  = ProductPayment
+        fields = [
+            'id', 'order_number', 'store_name',
+            'razorpay_order_id', 'razorpay_payment_id',
+            'amount', 'currency', 'status',
+            'paid_at', 'created_at',
+        ]
+        read_only_fields = fields

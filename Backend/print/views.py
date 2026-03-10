@@ -1193,29 +1193,19 @@ def get_user_orders(request):
             {'error': f'Failed to fetch orders: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-
-
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_order_detail(request, order_id):
-    """
-    Get detailed information for a specific order.
-    """
     try:
         user_profile = UserProfile.objects.get(user=request.user)
         
         order = ProductOrder.objects.select_related(
-            'store',
-            'store__shop_profile'
+            'store', 'store__shop_profile'
         ).prefetch_related(
-            'items__product',
-            'status_logs'
-        ).get(
-            id=order_id,
-            user_profile=user_profile
-        )
-        
-        # Get delivery info if exists
+            'items__product', 'status_logs'
+        ).get(id=order_id, user_profile=user_profile)
+
+        # Delivery info
         delivery_info = None
         if hasattr(order, 'delivery'):
             delivery = order.delivery
@@ -1226,8 +1216,8 @@ def get_order_detail(request, order_id):
                 'delivery_person_phone': delivery.delivery_person_phone,
                 'is_completed': delivery.is_completed,
             }
-        
-        # Get status timeline
+
+        # Status timeline
         status_timeline = [
             {
                 'from_status': log.from_status,
@@ -1237,7 +1227,10 @@ def get_order_detail(request, order_id):
             }
             for log in order.status_logs.all()
         ]
-        
+
+        # ✅ FIX 1 — define effective_total BEFORE using it in response
+        effective_total = order.quoted_price if order.quoted_price else order.total
+
         return Response({
             'success': True,
             'order': {
@@ -1252,8 +1245,20 @@ def get_order_detail(request, order_id):
                 },
                 'status': order.status,
                 'status_display': order.get_status_display(),
+
+                # ✅ FIX 2 — add tracking timestamps block
+                'tracking': {
+                    'confirmed_at':        order.confirmed_at.isoformat() if order.confirmed_at else None,
+                    'preparing_at':        order.preparing_at.isoformat() if order.preparing_at else None,
+                    'ready_at':            order.ready_at.isoformat() if order.ready_at else None,
+                    'out_for_delivery_at': order.out_for_delivery_at.isoformat() if order.out_for_delivery_at else None,
+                    'delivered_at':        order.delivered_at.isoformat() if order.delivered_at else None,
+                    'cancelled_at':        order.cancelled_at.isoformat() if order.cancelled_at else None,
+                },
+
                 'items': [
                     {
+                        'id': item.id,
                         'name': item.product_name_snapshot,
                         'sku': item.product_sku_snapshot,
                         'quantity': item.qty,
@@ -1263,30 +1268,41 @@ def get_order_detail(request, order_id):
                     }
                     for item in order.items.all()
                 ],
-                'subtotal': str(order.subtotal),
-                'delivery_fee': str(order.delivery_fee),
-                'total': str(order.total),
+
+                # ✅ FIX 3 — financial block with effective_total now defined
+                'financial': {
+                    'subtotal':         str(order.subtotal),
+                    'delivery_fee':     str(order.delivery_fee),
+                    'tax_amount':       str(order.tax_amount),
+                    'discount_amount':  str(order.discount_amount),
+                    'original_total':   str(order.total),
+                    'quoted_price':     str(order.quoted_price) if order.quoted_price else None,
+                    'effective_total':  str(effective_total),
+                    'is_price_updated': order.quoted_price is not None,
+                },
+
+                # ✅ FIX 4 — REMOVE duplicate flat fields (subtotal/delivery_fee/total)
+                # these were causing confusion — financial{} replaces them
                 'is_delivery': order.is_delivery,
                 'delivery_address': order.delivery_address_text,
                 'pickup_note': order.pickup_note,
+                'vendor_notes': order.vendor_notes,
+                'customer_notes': order.customer_notes,
+                'cancellation_reason': order.cancellation_reason,
+                'cancelled_by': order.cancelled_by,
+                'estimated_ready_time': order.estimated_ready_time.isoformat() if order.estimated_ready_time else None,
                 'delivery': delivery_info,
                 'status_timeline': status_timeline,
                 'created_at': order.created_at.isoformat(),
             }
         }, status=status.HTTP_200_OK)
-    
+
     except ProductOrder.DoesNotExist:
-        return Response(
-            {'error': 'Order not found'},
-            status=status.HTTP_404_NOT_FOUND
-        )
+        return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
-        return Response(
-            {'error': str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
-
+        import traceback
+        traceback.print_exc()
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # views.py
@@ -1346,46 +1362,62 @@ def get_vendor_store_orders(request):
             orders = orders.filter(store_id=store_id_param)
 
         # Serialize
+        # In get_vendor_store_orders — replace the serialization loop
         data = []
         for order in orders:
-            data.append(
-                {
-                    "order_id": order.id,
-                    "order_number": order.order_number,
-                    "store": {
-                        "id": order.store.id,
-                        "name": order.store.name,
-                        "type": order.store.store_type,
-                    },
-                    "customer": {
-                        "id": order.user_profile.id,
-                        "username": order.user_profile.user.username,
-                        "phone": order.user_profile.phone,
-                        "college": order.user_profile.college,
-                    },
-                    "status": order.status,
-                    "status_display": order.get_status_display(),
-                    "is_delivery": order.is_delivery,
-                    "delivery_address": order.delivery_address_text,
-                    "pickup_note": order.pickup_note,
-                    "subtotal": str(order.subtotal),
-                    "delivery_fee": str(order.delivery_fee),
-                    "total": str(order.total),
-                    "items": [
-                        {
-                            "id": item.id,
-                            "product_id": item.product.id,
-                            "name": item.product_name_snapshot,
-                            "sku": item.product_sku_snapshot,
-                            "quantity": item.qty,
-                            "unit_price": str(item.unit_price_snapshot),
-                            "line_total": str(item.line_total),
-                        }
-                        for item in order.items.all()
-                    ],
-                    "created_at": order.created_at.isoformat(),
-                }
-            )
+            # ✅ FIX — compute effective_total here too
+            effective_total = order.quoted_price if order.quoted_price else order.total
+
+            data.append({
+                'order_id': order.id,
+                'order_number': order.order_number,
+                'store': {
+                    'id': order.store.id,
+                    'name': order.store.name,
+                    'type': order.store.store_type,
+                },
+                'customer': {
+                    'id': order.user_profile.id,
+                    'username': order.user_profile.user.username,
+                    'phone': order.user_profile.phone,
+                    'college': order.user_profile.college,
+                },
+                'status': order.status,
+                'status_display': order.get_status_display(),
+                'is_delivery': order.is_delivery,
+                'delivery_address': order.delivery_address_text,
+                'pickup_note': order.pickup_note,
+
+                # ✅ Replace flat subtotal/total with financial object
+                'financial': {
+                    'subtotal':         str(order.subtotal),
+                    'delivery_fee':     str(order.delivery_fee),
+                    'tax_amount':       str(order.tax_amount),
+                    'discount_amount':  str(order.discount_amount),
+                    'original_total':   str(order.total),
+                    'quoted_price':     str(order.quoted_price) if order.quoted_price else None,
+                    'effective_total':  str(effective_total),
+                    'is_price_updated': order.quoted_price is not None,
+                },
+
+                'items': [
+                    {
+                        'id': item.id,
+                        'product_id': item.product.id,
+                        'name': item.product_name_snapshot,
+                        'sku': item.product_sku_snapshot,
+                        'quantity': item.qty,
+                        'unit_price': str(item.unit_price_snapshot),
+                        'line_total': str(item.line_total),
+                    }
+                    for item in order.items.all()
+                ],
+                'vendor_notes': order.vendor_notes,
+                'cancellation_reason': order.cancellation_reason,
+                'created_at': order.created_at.isoformat(),
+                'updated_at': order.updated_at.isoformat(),
+            })
+
 
         return Response(
             {
@@ -1524,3 +1556,366 @@ def vendor_cancel_order(request, order_id):
         'cancelled_by': 'vendor',
         'reason': reason
     }, status=status.HTTP_200_OK)
+from decimal import Decimal, InvalidOperation
+
+
+def _safe_dec(val, field_name):
+    """Returns Decimal('0.00') for blank/null. Raises ValueError with clear message on bad input."""
+    if val in (None, '', 'null', 'None', 'undefined'):
+        return Decimal('0.00')
+    try:
+        return Decimal(str(val).strip()).quantize(Decimal('0.01'))
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"'{field_name}' has an invalid value: {val!r}. Expected a number like 300 or 15.50.")
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def vendor_update_order_status(request, order_id):
+    if request.user.role != User.ROLE_SHOP:
+        return Response({'error': 'Only vendors can update order status.'}, status=403)
+
+    try:
+        shop_profile = ShopProfile.objects.get(user=request.user)
+        order = ProductOrder.objects.get(id=order_id, store__shop_profile=shop_profile)
+    except ShopProfile.DoesNotExist:
+        return Response({'error': 'Shop profile not found.'}, status=404)
+    except ProductOrder.DoesNotExist:
+        return Response({'error': 'Order not found or does not belong to your store.'}, status=404)
+
+    new_status = (request.data.get('status') or '').strip()
+    if not new_status:
+        return Response({'error': 'status is required.'}, status=400)
+
+    allowed_transitions = {
+        ProductOrder.STATUS_CREATED:          [ProductOrder.STATUS_CONFIRMED],
+        ProductOrder.STATUS_CONFIRMED:        [ProductOrder.STATUS_PREPARING],
+        ProductOrder.STATUS_PREPARING:        [ProductOrder.STATUS_READY],
+        ProductOrder.STATUS_READY:            [ProductOrder.STATUS_OUT_FOR_DELIVERY, ProductOrder.STATUS_DELIVERED],
+        ProductOrder.STATUS_OUT_FOR_DELIVERY: [ProductOrder.STATUS_DELIVERED],
+    }
+
+    allowed = allowed_transitions.get(order.status, [])
+    if new_status not in allowed:
+        return Response({
+            'error': f'Cannot move from "{order.status}" to "{new_status}".',
+            'current_status': order.status,
+            'allowed_next': allowed,
+        }, status=400)
+
+    # ── QUOTED PRICE BLOCK ─────────────────────────────────────────────────
+    price_update_info = None
+
+    # Snapshot originals BEFORE any changes (local vars only — no original_total field on model)
+    original_subtotal = Decimal(str(order.subtotal       or '0')).quantize(Decimal('0.01'))
+    original_total    = Decimal(str(order.total          or '0')).quantize(Decimal('0.01'))
+    original_tax      = Decimal(str(order.tax_amount     or '0')).quantize(Decimal('0.01'))
+    original_delivery = Decimal(str(order.delivery_fee   or '0')).quantize(Decimal('0.01'))
+
+    if new_status == ProductOrder.STATUS_CONFIRMED:
+        quoted_price_raw = request.data.get('quoted_price')
+        tax_amount_raw   = request.data.get('tax_amount')   # ₹ rupees e.g. 15.00
+        delivery_fee_raw = request.data.get('delivery_fee') # ₹ rupees e.g. 29.00
+
+        if quoted_price_raw not in (None, '', 'null', 'None', 'undefined'):
+            try:
+                # ── Parse all as plain RUPEE amounts ──
+                quoted       = _safe_dec(quoted_price_raw, 'quoted_price')
+                tax_rupees   = _safe_dec(tax_amount_raw,   'tax_amount')
+                delivery_fee = (
+                    _safe_dec(delivery_fee_raw, 'delivery_fee')
+                    if delivery_fee_raw not in (None, '', 'null', 'None', 'undefined')
+                    else original_delivery          # keep existing delivery fee if not sent
+                )
+                discount = Decimal(str(order.discount_amount or '0')).quantize(Decimal('0.01'))
+
+                # ── Validate ──
+                if quoted <= Decimal('0'):
+                    return Response({'error': 'quoted_price must be greater than 0.'}, status=400)
+                if tax_rupees < Decimal('0'):
+                    return Response({'error': 'tax_amount must be 0 or more.'}, status=400)
+                if delivery_fee < Decimal('0'):
+                    return Response({'error': 'delivery_fee must be 0 or more.'}, status=400)
+
+                # ── Rupee arithmetic — NO rate multiplication ──
+                # e.g. quoted=300, tax=15, delivery=29, discount=0
+                #      new_total = 300 + 29 + 15 - 0 = 344.00
+                new_subtotal = quoted
+                new_tax      = tax_rupees
+                new_total    = (new_subtotal + delivery_fee + new_tax - discount).quantize(Decimal('0.01'))
+
+                vendor_note = (request.data.get('notes') or '').strip()
+
+                # ── Save — ONLY fields that exist on ProductOrder model ──
+                order.quoted_price  = quoted        # ✅ model field
+                order.subtotal      = new_subtotal  # ✅ model field
+                order.tax_amount    = new_tax       # ✅ model field
+                order.delivery_fee  = delivery_fee  # ✅ model field
+                order.total         = new_total     # ✅ model field
+                order.vendor_notes  = vendor_note or f'Vendor quoted ₹{quoted}'  # ✅ model field
+                order.save(update_fields=[
+                    'quoted_price',
+                    'subtotal',
+                    'tax_amount',
+                    'delivery_fee',
+                    'total',
+                    'vendor_notes',
+                    # ❌ original_total  — does NOT exist on model, removed
+                ])
+
+                # original_total lives only in the response payload (local var)
+                price_update_info = {
+                    'original_subtotal': str(original_subtotal),
+                    'original_total':    str(original_total),   # snapshot var, not a model field
+                    'original_tax':      str(original_tax),
+                    'original_delivery': str(original_delivery),
+                    'quoted_price':      str(quoted),
+                    'new_subtotal':      str(new_subtotal),
+                    'new_tax':           str(new_tax),
+                    'new_delivery_fee':  str(delivery_fee),
+                    'new_total':         str(new_total),
+                }
+
+            except ValueError as e:
+                return Response({'error': str(e)}, status=400)
+            except (InvalidOperation, TypeError) as e:
+                return Response({
+                    'error': 'Could not parse quoted_price, tax_amount, or delivery_fee.',
+                    'detail': str(e),
+                }, status=400)
+
+    # ── Status transition via update_status() ─────────────────────────────
+    notes = (request.data.get('notes') or f'Status updated by vendor to {new_status}').strip()
+    if price_update_info:
+        notes = f"Vendor confirmed with quoted price ₹{request.data.get('quoted_price')}. {notes}".strip()
+
+    order.update_status(new_status, notes=notes)
+
+    # ── Reload fresh values after update_status() save ────────────────────
+    order.refresh_from_db()
+
+    effective_total = order.quoted_price if order.quoted_price else order.total
+
+    response_data = {
+        'success':            True,
+        'message':            f'Order status updated to "{new_status}".',
+        'order_id':           order.id,
+        'order_number':       order.order_number,
+        'new_status':         new_status,
+        'new_status_display': order.get_status_display(),
+        'financial': {
+            'subtotal':         str(order.subtotal),
+            'delivery_fee':     str(order.delivery_fee),
+            'tax_amount':       str(order.tax_amount),
+            'discount_amount':  str(order.discount_amount),
+            # original_total returned from snapshot var, NOT model field
+            'original_total':   str(original_total) if price_update_info else None,
+            'quoted_price':     str(order.quoted_price) if order.quoted_price else None,
+            'effective_total':  str(effective_total),
+            'is_price_updated': order.quoted_price is not None,
+        },
+    }
+
+    if price_update_info:
+        response_data['price_breakdown'] = price_update_info
+
+    return Response(response_data, status=200)
+
+
+
+
+
+
+
+
+# Add to your existing views.py
+
+import razorpay
+from decimal import Decimal
+from django.conf import settings
+from django.utils import timezone
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+razorpay_client = razorpay.Client(
+    auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_product_payment(request, order_id):
+    try:
+        order = ProductOrder.objects.select_related(
+            'store', 'store__shop_profile', 'user_profile'
+        ).get(id=order_id, user_profile__user=request.user)
+    except ProductOrder.DoesNotExist:
+        return Response({'error': 'Order not found.'}, status=404)
+
+    if order.is_paid:
+        return Response({'error': 'Order is already paid.'}, status=400)
+
+    if order.status not in (
+        ProductOrder.STATUS_CONFIRMED,
+        ProductOrder.STATUS_PREPARING,
+        ProductOrder.STATUS_READY,
+    ):
+        return Response({
+            'error': f'Cannot pay. Status is "{order.status}". Vendor must confirm first.'
+        }, status=400)
+
+    # Reuse existing pending payment
+    existing = ProductPayment.objects.filter(
+        order=order, status=ProductPayment.STATUS_PENDING
+    ).first()
+    if existing:
+        return Response({
+            'razorpay_order_id': existing.razorpay_order_id,
+            'razorpay_key_id':   settings.RAZORPAY_KEY_ID,
+            'amount':            int(existing.amount * 100),
+            'currency':          'INR',
+            'order_id':          order.id,
+            'order_number':      order.order_number,
+            'effective_total':   str(existing.amount),
+        }, status=200)
+
+    effective_total = order.quoted_price if order.quoted_price else order.total
+    amount_paise    = int(effective_total * 100)
+
+    if amount_paise <= 0:
+        return Response({'error': 'Order amount is ₹0.'}, status=400)
+
+    try:
+        rzp_order = razorpay_client.order.create({
+            'amount':   amount_paise,
+            'currency': 'INR',
+            'receipt':  str(order.order_number)[:40],
+            'notes':    {
+                'order_id':     str(order.id),
+                'order_number': order.order_number,
+            },
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return Response({'error': f'Razorpay error: {str(e)}'}, status=500)
+
+    # ✅ THIS IS WHAT WAS MISSING — save to DB
+    payment = ProductPayment.objects.create(
+        order=order,
+        razorpay_order_id=rzp_order['id'],
+        amount=effective_total,
+        currency='INR',
+        status=ProductPayment.STATUS_PENDING,
+    )
+
+    print(f"✅ ProductPayment created: id={payment.id}, rzp={payment.razorpay_order_id}")
+
+    return Response({
+        'razorpay_order_id': payment.razorpay_order_id,
+        'razorpay_key_id':   settings.RAZORPAY_KEY_ID,
+        'amount':            amount_paise,
+        'currency':          'INR',
+        'order_id':          order.id,
+        'order_number':      order.order_number,
+        'effective_total':   str(effective_total),
+    }, status=200)
+
+
+# ── 2. Verify Payment ─────────────────────────────────────────
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def verify_product_payment(request, order_id):
+    """
+    POST /api/orders/<order_id>/verify-payment/
+    Body: { razorpay_order_id, razorpay_payment_id, razorpay_signature }
+    """
+    razorpay_order_id   = request.data.get('razorpay_order_id',   '').strip()
+    razorpay_payment_id = request.data.get('razorpay_payment_id', '').strip()
+    razorpay_signature  = request.data.get('razorpay_signature',  '').strip()
+
+    if not all([razorpay_order_id, razorpay_payment_id, razorpay_signature]):
+        return Response(
+            {'error': 'razorpay_order_id, razorpay_payment_id and razorpay_signature are required.'},
+            status=400
+        )
+
+    try:
+        payment = ProductPayment.objects.select_related('order', 'order__user_profile').get(
+            razorpay_order_id=razorpay_order_id,
+            order__user_profile__user=request.user,  # ✅ user_profile not userprofile
+        )
+    except ProductPayment.DoesNotExist:
+        return Response({'error': 'Payment record not found.'}, status=404)
+
+    if payment.status == ProductPayment.STATUS_SUCCESS:
+        return Response({'success': True, 'message': 'Payment already verified.'}, status=200)
+
+    # ── Verify HMAC signature ─────────────────────────────────
+    try:
+        razorpay_client.utility.verify_payment_signature({
+            'razorpay_order_id':   razorpay_order_id,
+            'razorpay_payment_id': razorpay_payment_id,
+            'razorpay_signature':  razorpay_signature,
+        })
+    except razorpay.errors.SignatureVerificationError:
+        payment.mark_failed(reason='Signature verification failed')
+        return Response({'error': 'Invalid payment signature. Payment failed.'}, status=400)
+
+    # ── Mark success ──────────────────────────────────────────
+    payment.mark_success(razorpay_payment_id, razorpay_signature)
+
+    # ── Reload order fresh after mark_success ─────────────────
+    payment.order.refresh_from_db()
+
+    # ── Advance order to confirmed if still in created ────────
+    if payment.order.status == ProductOrder.STATUS_CREATED:
+        payment.order.update_status(
+            ProductOrder.STATUS_CONFIRMED,
+            notes='Auto-confirmed after successful payment',
+        )
+
+    return Response({
+        'success':             True,
+        'message':             'Payment verified successfully.',
+        'order_id':            payment.order.id,
+        'order_number':        str(payment.order.order_number),
+        'razorpay_payment_id': razorpay_payment_id,
+        'amount_paid':         str(payment.amount),
+        'paid_at':             payment.paid_at.isoformat() if payment.paid_at else None,
+    }, status=200)
+
+
+# ── 3. Payment Status ─────────────────────────────────────────
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def product_payment_status(request, order_id):
+    """
+    GET /api/orders/<order_id>/payment-status/
+    """
+    try:
+        payment = ProductPayment.objects.select_related('order').get(
+            order__id=order_id,
+            order__user_profile__user=request.user,  # ✅ user_profile not userprofile
+        )
+    except ProductPayment.DoesNotExist:
+        return Response({'error': 'No payment found for this order.'}, status=404)
+
+    return Response({
+        'status':              payment.status,
+        'razorpay_order_id':   payment.razorpay_order_id,
+        'razorpay_payment_id': payment.razorpay_payment_id,
+        'amount':              str(payment.amount),
+        'paid_at':             payment.paid_at.isoformat() if payment.paid_at else None,
+        'created_at':          payment.created_at.isoformat(),
+    }, status=200)
+
+
+# ── Helper ────────────────────────────────────────────────────
+def _get_prefill(user):
+    name  = user.username
+    email = ''
+    phone = ''
+    # ✅ user_profile not userprofile
+    if hasattr(user, 'user_profile'):
+        email = getattr(user.user_profile, 'email', '') or ''
+        phone = getattr(user.user_profile, 'phone', '') or ''
+    return {'name': name, 'email': email, 'contact': phone}

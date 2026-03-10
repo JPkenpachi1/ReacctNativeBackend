@@ -542,6 +542,38 @@ class UserPushToken(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.token[:30]}"
+class Notification(models.Model):
+    TYPE_ORDER_CANCELLED = 'order_cancelled'
+    TYPE_ORDER_STATUS = 'order_status'
+    TYPE_ORDER_CONFIRMED = 'order_confirmed'
+    TYPE_GENERAL = 'general'
+
+    TYPE_CHOICES = [
+        (TYPE_ORDER_CANCELLED, 'Order Cancelled'),
+        (TYPE_ORDER_STATUS, 'Order Status Update'),
+        (TYPE_ORDER_CONFIRMED, 'Order Confirmed'),
+        (TYPE_GENERAL, 'General'),
+    ]
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications')
+    notification_type = models.CharField(
+        max_length=30, choices=TYPE_CHOICES, default=TYPE_GENERAL, db_index=True
+    )
+    title = models.CharField(max_length=255)
+    message = models.TextField()
+    is_read = models.BooleanField(default=False, db_index=True)
+    related_order_id = models.IntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'notifications'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'is_read', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username}: {self.title}"
 
 
 class ProductOrder(models.Model):
@@ -618,6 +650,10 @@ class ProductOrder(models.Model):
     out_for_delivery_at = models.DateTimeField(null=True, blank=True)
     delivered_at = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
+    # Inside your existing ProductOrder model — add these 2 fields:
+    is_paid = models.BooleanField(default=False, db_index=True)
+    paid_at = models.DateTimeField(blank=True, null=True)
+
     
     # Additional tracking
     estimated_ready_time = models.DateTimeField(
@@ -649,6 +685,7 @@ class ProductOrder(models.Model):
         (CANCELLED_BY_VENDOR, 'Vendor'),
         (CANCELLED_BY_ADMIN, 'Admin'),
     ]
+    
 
     cancelled_by = models.CharField(
         max_length=10,
@@ -656,7 +693,11 @@ class ProductOrder(models.Model):
         null=True,
         blank=True
     )
-
+    quoted_price = models.DecimalField(
+    max_digits=10, decimal_places=2,
+    null=True, blank=True,
+    help_text="Vendor's quoted price; triggers financial recalculation"
+)
     
     class Meta:
         db_table = 'product_orders'
@@ -680,75 +721,6 @@ class ProductOrder(models.Model):
             random_suffix = random.randint(100000, 999999)
             self.order_number = f"ORD-{timestamp}-{random_suffix}"
         super().save(*args, **kwargs)
-    
-    def update_status(self, new_status, notes=""):
-        """
-        Update order status and log the change.
-        """
-        from django.utils import timezone
-        
-        old_status = self.status
-        self.status = new_status
-        
-        # Update timestamp based on status
-        timestamp_map = {
-            self.STATUS_CONFIRMED: 'confirmed_at',
-            self.STATUS_PREPARING: 'preparing_at',
-            self.STATUS_READY: 'ready_at',
-            self.STATUS_OUT_FOR_DELIVERY: 'out_for_delivery_at',
-            self.STATUS_DELIVERED: 'delivered_at',
-            self.STATUS_CANCELLED: 'cancelled_at',
-        }
-        
-        if new_status in timestamp_map:
-            setattr(self, timestamp_map[new_status], timezone.now())
-        
-        self.save()
-        
-        # Create status change log
-        OrderStatusLog.objects.create(
-            order=self,
-            from_status=old_status,
-            to_status=new_status,
-            notes=notes
-        )
-        
-        # Send notification to customer
-        self._notify_customer_status_change(new_status)
-    
-    def _notify_customer_status_change(self, new_status, cancelled_by=None):
-        from .utils import notify_user
-        from .models import Notification
-
-        if new_status == self.STATUS_CANCELLED:
-            reason = self.cancellation_reason or 'N/A'
-            if cancelled_by == self.CANCELLED_BY_VENDOR:
-                notify_user(
-                    self.user_profile.user,
-                    "Order Cancelled by Vendor ❌",
-                    f"Your order {self.order_number} was cancelled. Reason: {reason}",
-                    Notification.TYPE_ORDER_CANCELLED, self.id
-                )
-            elif cancelled_by == self.CANCELLED_BY_USER:
-                notify_user(
-                    self.store.shop_profile.user,
-                    "Order Cancelled by Customer ❌",
-                    f"Order {self.order_number} was cancelled by the customer. Reason: {reason}",
-                    Notification.TYPE_ORDER_CANCELLED, self.id
-                )
-        else:
-            messages = {
-                self.STATUS_CONFIRMED: ("Order Confirmed ✅", f"Your order {self.order_number} has been confirmed."),
-                self.STATUS_PREPARING: ("Preparing Your Order 🍳", f"Order {self.order_number} is being prepared."),
-                self.STATUS_READY: ("Order Ready 🎉", f"Your order {self.order_number} is ready for pickup!"),
-                self.STATUS_OUT_FOR_DELIVERY: ("Out for Delivery 🚴", f"Order {self.order_number} is on its way."),
-                self.STATUS_DELIVERED: ("Delivered ✅", f"Your order {self.order_number} has been delivered!"),
-            }
-            if new_status in messages:
-                title, msg = messages[new_status]
-                notify_user(self.user_profile.user, title, msg, Notification.TYPE_ORDER_STATUS, self.id)
-
-
     
     def update_status(self, new_status, notes="", cancelled_by=None):
         from django.utils import timezone
@@ -778,6 +750,135 @@ class ProductOrder(models.Model):
             notes=notes
         )
         self._notify_customer_status_change(new_status, cancelled_by=cancelled_by)
+
+    
+    def _notify_customer_status_change(self, new_status, cancelled_by=None):
+        from .utils import notify_user
+
+        if new_status == self.STATUS_CANCELLED:
+            reason = self.cancellation_reason or 'N/A'
+            if cancelled_by == self.CANCELLED_BY_VENDOR:
+                notify_user(
+                    self.user_profile.user,
+                    "Order Cancelled by Vendor ❌",
+                    f"Your order {self.order_number} was cancelled. Reason: {reason}",
+                    'order_cancelled',   # ✅ string directly, no Notification.TYPE_*
+                    self.id
+                )
+            elif cancelled_by == self.CANCELLED_BY_USER:
+                notify_user(
+                    self.store.shop_profile.user,
+                    "Order Cancelled by Customer ❌",
+                    f"Order {self.order_number} was cancelled by the customer. Reason: {reason}",
+                    'order_cancelled',   # ✅
+                    self.id
+                )
+        else:
+            messages_map = {
+                self.STATUS_CONFIRMED: ("Order Confirmed ✅", f"Your order {self.order_number} has been confirmed."),
+                self.STATUS_PREPARING: ("Preparing Your Order 🍳", f"Order {self.order_number} is being prepared."),
+                self.STATUS_READY: ("Order Ready 🎉", f"Your order {self.order_number} is ready for pickup!"),
+                self.STATUS_OUT_FOR_DELIVERY: ("Out for Delivery 🚴", f"Order {self.order_number} is on its way."),
+                self.STATUS_DELIVERED: ("Delivered ✅", f"Your order {self.order_number} has been delivered!"),
+            }
+            if new_status in messages_map:
+                title, msg = messages_map[new_status]
+                notify_user(
+                    self.user_profile.user,
+                    title,
+                    msg,
+                    'order_status',   # ✅
+                    self.id
+                )
+
+
+
+    
+   
+# Add this at the bottom of your existing models.py
+
+class ProductPayment(models.Model):
+
+    STATUS_PENDING  = 'pending'   # ✅ ADD THIS
+    STATUS_CREATED  = 'created'
+    STATUS_SUCCESS  = 'success'
+    STATUS_FAILED   = 'failed'
+    STATUS_REFUNDED = 'refunded'
+
+    STATUS_CHOICES = [
+        (STATUS_PENDING,  'Pending'),   # ✅ ADD THIS
+        (STATUS_CREATED,  'Created'),
+        (STATUS_SUCCESS,  'Success'),
+        (STATUS_FAILED,   'Failed'),
+        (STATUS_REFUNDED, 'Refunded'),
+    ]
+
+    # ── Relations ──────────────────────────────────────────
+    order = models.OneToOneField(
+        ProductOrder,
+        on_delete=models.CASCADE,
+        related_name='payment',
+    )
+    user = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='product_payments',
+    )
+
+    # ── Razorpay Fields ────────────────────────────────────
+    razorpay_order_id   = models.CharField(max_length=100, unique=True)
+    razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True)
+    razorpay_signature  = models.CharField(max_length=255, blank=True, null=True)
+
+    # ── Amount ─────────────────────────────────────────────
+    amount       = models.DecimalField(max_digits=10, decimal_places=2)
+    amount_paise = models.PositiveIntegerField(default=0)
+    currency     = models.CharField(max_length=10, default='INR')
+
+    # ── Status ─────────────────────────────────────────────
+    status         = models.CharField(
+                        max_length=20,
+                        choices=STATUS_CHOICES,
+                        default=STATUS_PENDING,  # ✅ default to pending
+                        db_index=True
+                     )
+    failure_reason = models.TextField(blank=True)
+
+    # ── Timestamps ─────────────────────────────────────────
+    paid_at    = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'product_payments'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['order']),
+            models.Index(fields=['razorpay_order_id']),
+            models.Index(fields=['status']),
+        ]
+
+    def __str__(self):
+        return f"Payment {self.razorpay_order_id} — ₹{self.amount} [{self.status}]"
+
+    def mark_success(self, payment_id: str, signature: str):
+        from django.utils import timezone
+        self.razorpay_payment_id = payment_id
+        self.razorpay_signature  = signature
+        self.status              = self.STATUS_SUCCESS
+        self.paid_at             = timezone.now()
+        self.save(update_fields=[
+            'razorpay_payment_id', 'razorpay_signature', 'status', 'paid_at'
+        ])
+        self.order.is_paid = True
+        self.order.paid_at = timezone.now()
+        self.order.save(update_fields=['is_paid', 'paid_at'])
+
+    def mark_failed(self, reason: str = ''):
+        self.status         = self.STATUS_FAILED
+        self.failure_reason = reason
+        self.save(update_fields=['status', 'failure_reason'])
 
 
 class ProductOrderItem(models.Model):
