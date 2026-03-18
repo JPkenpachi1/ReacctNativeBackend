@@ -79,6 +79,7 @@ path(
 path('api/orders/<int:order_id>/create-payment/',  create_product_payment,   name='create-product-payment'),
 path('api/orders/<int:order_id>/verify-payment/',  verify_product_payment,    name='verify-product-payment'),
 path('api/orders/<int:order_id>/payment-status/',  product_payment_status,    name='product-payment-status'),
+path('admin-dashboard/', admin_orders_dashboard, name='admin-dashboard'),
 
     
 ]+ (static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT) if settings.DEBUG else [])

@@ -1236,6 +1236,8 @@ def get_order_detail(request, order_id):
             'order': {
                 'order_id': order.id,
                 'order_number': order.order_number,
+                'is_paid':  order.is_paid,   
+                'paid_at':  order.paid_at.isoformat(),
                 'store': {
                     'id': order.store.id,
                     'name': order.store.name,
@@ -1371,6 +1373,8 @@ def get_vendor_store_orders(request):
             data.append({
                 'order_id': order.id,
                 'order_number': order.order_number,
+                 'is_paid':  order.is_paid,                                          # ✅ ADD
+                'paid_at':  order.paid_at.isoformat() if order.paid_at else None,  #
                 'store': {
                     'id': order.store.id,
                     'name': order.store.name,
@@ -1919,3 +1923,110 @@ def _get_prefill(user):
         email = getattr(user.user_profile, 'email', '') or ''
         phone = getattr(user.user_profile, 'phone', '') or ''
     return {'name': name, 'email': email, 'contact': phone}
+
+
+
+
+from django.contrib.admin.views.decorators import staff_member_required
+from django.shortcuts import render
+from django.db.models import Count, Sum, Q
+from django.utils import timezone
+from datetime import timedelta
+
+@staff_member_required
+def admin_orders_dashboard(request):
+    from .models import ProductOrder, ProductPayment
+
+    # ── Filters from GET params ───────────────────────────
+    status_filter   = request.GET.get('status', '')
+    payment_filter  = request.GET.get('payment', '')
+    store_filter    = request.GET.get('store', '')
+    date_filter     = request.GET.get('date', '')
+    search_query    = request.GET.get('q', '')
+
+    orders = ProductOrder.objects.select_related(
+        'store', 'store__shop_profile', 'user_profile', 'user_profile__user'
+    ).prefetch_related('items', 'payment').order_by('-created_at')
+
+    # ── Apply filters ─────────────────────────────────────
+    if status_filter:
+        orders = orders.filter(status=status_filter)
+
+    if payment_filter == 'paid':
+        orders = orders.filter(is_paid=True)
+    elif payment_filter == 'unpaid':
+        orders = orders.filter(is_paid=False)
+    elif payment_filter == 'payment_success':
+        orders = orders.filter(payment__status='success')
+    elif payment_filter == 'payment_failed':
+        orders = orders.filter(payment__status='failed')
+    elif payment_filter == 'payment_pending':
+        orders = orders.filter(payment__status='created')
+
+    if store_filter:
+        orders = orders.filter(store__id=store_filter)
+
+    if date_filter == 'today':
+        orders = orders.filter(created_at__date=timezone.now().date())
+    elif date_filter == 'yesterday':
+        orders = orders.filter(
+            created_at__date=timezone.now().date() - timedelta(days=1)
+        )
+    elif date_filter == 'this_week':
+        orders = orders.filter(
+            created_at__gte=timezone.now() - timedelta(days=7)
+        )
+    elif date_filter == 'this_month':
+        orders = orders.filter(
+            created_at__gte=timezone.now() - timedelta(days=30)
+        )
+
+    if search_query:
+        orders = orders.filter(
+            Q(order_number__icontains=search_query) |
+            Q(user_profile__user__username__icontains=search_query) |
+            Q(store__name__icontains=search_query)
+        )
+
+    # ── Stats (always on full unfiltered set) ─────────────
+    all_orders = ProductOrder.objects.all()
+    all_payments = ProductPayment.objects.all()
+
+    stats = {
+        'total_orders':     all_orders.count(),
+        'active_orders':    all_orders.exclude(status__in=['delivered', 'cancelled']).count(),
+        'delivered':        all_orders.filter(status='delivered').count(),
+        'cancelled':        all_orders.filter(status='cancelled').count(),
+        'paid_orders':      all_orders.filter(is_paid=True).count(),
+        'unpaid_orders':    all_orders.filter(is_paid=False).count(),
+        'total_revenue':    all_payments.filter(status='success').aggregate(
+                                total=Sum('amount')
+                            )['total'] or 0,
+        'payment_success':  all_payments.filter(status='success').count(),
+        'payment_failed':   all_payments.filter(status='failed').count(),
+        'payment_pending':  all_payments.filter(status='created').count(),
+
+        # Status breakdown
+        'status_created':          all_orders.filter(status='created').count(),
+        'status_confirmed':        all_orders.filter(status='confirmed').count(),
+        'status_preparing':        all_orders.filter(status='preparing').count(),
+        'status_ready':            all_orders.filter(status='ready').count(),
+        'status_out_for_delivery': all_orders.filter(status='out_for_delivery').count(),
+    }
+
+    # ── Stores for filter dropdown ─────────────────────────
+    from .models import Store
+    stores = Store.objects.all().order_by('name')
+
+    context = {
+        'orders':         orders,
+        'stats':          stats,
+        'stores':         stores,
+        'status_filter':  status_filter,
+        'payment_filter': payment_filter,
+        'store_filter':   store_filter,
+        'date_filter':    date_filter,
+        'search_query':   search_query,
+        'result_count':   orders.count(),
+    }
+    return render(request, 'admin_dashboard.html', context)
